@@ -52,31 +52,31 @@ The relaxation matrix `E` is diagonal with:
 
 **E is k-independent** — the same relaxation applies at every EPG order. The RF matrix `T` is also block-diagonal with **identical** 3×3 blocks at every k-order (the same flip angle and phase is applied to F+k, F-k*, Zk regardless of k).
 
-Therefore, applying `S^ngrad` instead of `S` only **relabels** k-space positions (e.g. F+0 → F+2 instead of F+0 → F+1 per TR) but does not change any amplitude or relaxation history. The signal at F+0 is unchanged.
+In EPG, the physical gradient is encoded as a **shift** of the state vector. Whether the spoiler gradient is weak (shifting F+k one unit per TR) or strong (shifting F+k two or more units per TR), the relaxation and RF mixing at every k-order are unchanged. A stronger gradient only changes which k-label the magnetisation carries — it does not change how much it decays.
 
 ### Concrete pathway calculation
 
-Consider the simplest refocusing pathway (the one-TR echo) for two cases.
+Consider the simplest refocusing pathway (the one-TR echo) for a weak spoiler (one shift per TR) versus a stronger spoiler (two shifts per TR).
 
-**ngrad = 1 (one shift per TR):**
+**Weak spoiler — one shift per TR:**
 
 | Step | Operation | State |
 |---|---|---|
 | Start TR1 | Initial Mz | Z0 = 1 |
 | TR1 RF (flip α, phase p₁) | Z0 → F+0 | F+0 = −½i·e^(−ip₁)·sin α |
-| TR1 relax + shift (×1) | F+0 → F+1·E2 | F+1 = E2·(−½i·e^(−ip₁)·sin α) |
+| TR1 relax + 1 shift | F+0 → F+1·E2 | F+1 = E2·(−½i·e^(−ip₁)·sin α) |
 | TR2 RF (flip α, phase p₂) | F+1 → F−1\* | F−1\* = e^(2ip₂)·sin²(α/2)·F+1 |
-| TR2 relax + shift (×1) | F−1\* → F+0·E2 | F+0 = E2²·½i·e^(ip₁−2ip₂)·sin²(α/2)·sin α |
+| TR2 relax + 1 shift | F−1\* → F+0·E2 | F+0 = E2²·½i·e^(ip₁−2ip₂)·sin²(α/2)·sin α |
 
-**ngrad = 2 (two shifts per TR):**
+**Stronger spoiler — two shifts per TR:**
 
 | Step | Operation | State |
 |---|---|---|
 | Start TR1 | Initial Mz | Z0 = 1 |
 | TR1 RF (flip α, phase p₁) | Z0 → F+0 | F+0 = −½i·e^(−ip₁)·sin α |
-| TR1 relax + shift (×2) | F+0 → F+2·E2 | F+2 = E2·(−½i·e^(−ip₁)·sin α) |
+| TR1 relax + 2 shifts | F+0 → F+2·E2 | F+2 = E2·(−½i·e^(−ip₁)·sin α) |
 | TR2 RF (flip α, phase p₂) | F+2 → F−2\* | F−2\* = e^(2ip₂)·sin²(α/2)·F+2 |
-| TR2 relax + shift (×2) | F−2\* → F+0·E2 | F+0 = E2²·½i·e^(ip₁−2ip₂)·sin²(α/2)·sin α |
+| TR2 relax + 2 shifts | F−2\* → F+0·E2 | F+0 = E2²·½i·e^(ip₁−2ip₂)·sin²(α/2)·sin α |
 
 **The signal amplitude is identical in both cases:**
 
@@ -84,23 +84,19 @@ Consider the simplest refocusing pathway (the one-TR echo) for two cases.
 F+0 = ½i · E2² · exp(ip₁ − 2ip₂) · sin²(α/2) · sin α
 ```
 
-The pathway visits k=2 (ngrad=2) instead of k=1 (ngrad=1) as an intermediate state, but it crosses **the same number of TR periods** and therefore accumulates **exactly the same T2 decay** (one factor of E2 per TR leg). The k-label is different; the amplitude is not.
+The pathway visits k=2 instead of k=1 as an intermediate state, but it crosses **the same number of TR periods** and therefore accumulates **exactly the same T2 decay** (one factor of E2 per TR leg). The k-label is different; the amplitude is not.
 
-The same argument extends to every pathway of every length: for each pathway contributing to F+0 with ngrad=1 (visiting orders k₀, k₁, k₂, …), there is a corresponding pathway with ngrad=2 visiting 2k₀, 2k₁, 2k₂, …, with identical amplitude. The total signal — the sum over all pathways — is therefore the same.
-
-### Empirical verification
-
-Running `EPG_GRE` with ngrad=1 and ngrad=10 (200 RF pulses) gives **identical signals** — the difference is identically zero. This confirms the theoretical result.
+The same argument holds for every pathway of every length. For each pathway visiting orders k₀, k₁, k₂, … with a weak spoiler, there is a corresponding pathway visiting 2k₀, 2k₁, 2k₂, … with the stronger spoiler, with identical amplitude. The total signal — the sum over all pathways — is therefore the same.
 
 ### Why the intuition "higher k-order = more decay" is wrong
 
-It is tempting to reason: a stronger gradient pushes pathways to higher k-space orders, so they are further from F+0 and harder to refocus, giving a smaller signal. This reasoning is incorrect because **T2 decay in EPG is per TR, not per unit of k-space distance**. A state at k=2 after one TR has experienced the same T2 decay as a state at k=1 after one TR — the relaxation matrix E applies `E2` equally to both. The gradient amplitude only determines which k-label is attached to the magnetisation, not how much it has decayed.
+It is tempting to reason: a stronger gradient pushes pathways to higher k-space orders, so they are further from F+0 and harder to refocus, giving a smaller signal. This reasoning is incorrect because **T2 decay in EPG is per TR, not per unit of k-space distance**. A state at k=2 after one TR has experienced exactly the same T2 decay as a state at k=1 after one TR — the relaxation matrix E applies `E2` equally to both. The gradient amplitude only determines which k-label is attached to the magnetisation, not how much it has decayed.
 
 ---
 
 ## Q3 — Is it possible at all to model a stronger or weaker gradient spoiling in EPG?
 
-**Without diffusion: no.** This is not a limitation of the code — it is a physical fact. EPG (like the isochromat model) assumes spins are **uniformly distributed** in phase across the voxel after any non-zero gradient. Whether the gradient creates 1 cycle/voxel or 100 cycles/voxel, the ensemble-averaged signal is identical, because only the phase *distribution* (uniform) matters, not the absolute gradient amplitude. Any non-zero gradient achieves the same uniform distribution.
+**Without diffusion: no.** This is not a limitation of the code — it is a physical fact. EPG (like the isochromat model) assumes spins are **uniformly distributed** in phase across the voxel after any non-zero gradient. Whether the gradient creates 1 cycle/voxel or 100 cycles/voxel, the ensemble-averaged signal is identical, because only the phase *distribution* (uniform) matters, not the absolute gradient amplitude. Any non-zero gradient achieves the same uniform distribution. The shift matrix `S` in `EPG_GRE.m` already encodes this: one shift per TR is sufficient to represent any spoiler gradient, and the number of shifts per TR does not change the signal.
 
 **With diffusion: yes.** Diffusion introduces k-dependent attenuation:
 
