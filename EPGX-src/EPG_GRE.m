@@ -31,23 +31,6 @@ function [F0,Fn,Zn,F] = EPG_GRE(theta,phi,TR,T1,T2,varargin)
 %                           flip    -   flip angle, rad
 %                           t_delay -   time delay, ms
 %
-%               ngrad:      integer number of unit gradient shifts applied
-%                           per TR for gradient spoiling (default = 1,
-%                           which reproduces the original RF-spoiling-only
-%                           behaviour). A value of ngrad means the spoiler
-%                           gradient area is ngrad times the unit gradient
-%                           area. Each TR the shift matrix S is applied
-%                           ngrad times (i.e. S^ngrad replaces S), so
-%                           transverse coherences are pushed ngrad orders
-%                           higher per TR. Combined with RF phase cycling
-%                           (phi) this models combined RF + gradient
-%                           spoiling. As ngrad increases, SEPG converges
-%                           toward the ideal SS-SPGR signal (STheory), so
-%                           the correction factor STheory/SEPG -> 1.
-%                           Note: computational cost scales with ngrad
-%                           because kmax (and hence the state-vector size)
-%                           grows proportionally.
-%
 %   Outputs:
 %               F0:         signal (F0 state) directly after each
 %                           excitation
@@ -58,12 +41,9 @@ function [F0,Fn,Zn,F] = EPG_GRE(theta,phi,TR,T1,T2,varargin)
 %
 %
 %   Shaihan Malik 2017-07-20
-%   ngrad (gradient spoiling) parameter added 2025
 
 
 %% Extra variables
-
-ngrad = 1; % default: one unit gradient shift per TR (original behaviour)
 
 for ii=1:length(varargin)
 
@@ -83,49 +63,31 @@ for ii=1:length(varargin)
         prep = varargin{ii+1};
     end
 
-    % Number of unit gradient shifts per TR (gradient spoiling)
-    % ngrad=1 is the original behaviour; larger values model stronger
-    % spoiler gradients by applying S^ngrad per TR instead of S.
-    if strcmpi(varargin{ii},'ngrad')
-        ngrad = round(varargin{ii+1});
-        if ngrad < 1
-            error('EPG_GRE: ngrad must be a positive integer (>=1).');
-        end
-    end
-
 end
 
 %%% The maximum order varies through the sequence. This can be used to speed up the calculation
 np = length(theta);
 
 % if not defined, assume want max.
-% With ngrad shifts per TR, the highest order reached after np TRs is
-% (np-1)*ngrad, so we scale kmax accordingly.
 if ~exist('kmax','var')
-    kmax = (np - 1) * ngrad;
+    kmax = np-1;
 end
 
 if isinf(kmax)
     % this flags that we don't want any pruning of pathways
     allpathways = true;
-    kmax = (np-1) * ngrad;
+    kmax = np-1;
 else
     allpathways = false;
 end
 
 %%% Variable pathways
-% kmax_per_pulse(jj) = maximum EPG order that can ever contribute to the
-% F0 readout at pulse jj. With ngrad shifts per TR, orders grow by ngrad
-% per TR, so the pyramid is scaled by ngrad relative to the ngrad=1 case.
 if allpathways
-    % After jj TRs (each with ngrad shifts), the highest order reached is
-    % jj*ngrad. Cap at kmax (= (np-1)*ngrad) for the last TR.
-    kmax_per_pulse = ngrad * (1:np);         %<-- was: (0:kmax)+1
-    kmax_per_pulse(kmax_per_pulse>kmax) = kmax;
+    kmax_per_pulse = (0:np-1)+1;
+    kmax_per_pulse(kmax_per_pulse>kmax)=kmax;
 else
-    % Pyramid: first half grows by ngrad each TR; second half mirrors it.
-    kmax_per_pulse = ngrad * [1:ceil(np/2) (floor(np/2)):-1:1];  %<-- was: [1:ceil(np/2) ...]
-    kmax_per_pulse(kmax_per_pulse>kmax) = kmax;
+    kmax_per_pulse = [1:ceil(np/2) (floor(np/2)):-1:1];
+    kmax_per_pulse(kmax_per_pulse>kmax)=kmax;
 
     if max(kmax_per_pulse)<kmax
         kmax = max(kmax_per_pulse);
@@ -135,23 +97,9 @@ end
 %%% Number of states is 3*(kmax+1) -- +1 for the zero order
 N = 3*(kmax+1);
 
-%%% Build unit-shift matrix, S
+%%% Build shift matrix
 S = EPG_shift_matrices(kmax);
 S = sparse(S);
-
-%%% Gradient spoiling: replace S with S^ngrad.
-% S^ngrad shifts F+n -> F+(n+ngrad) per TR, modelling a spoiler gradient
-% that is ngrad times larger than the unit gradient. Because S is a sparse
-% permutation-like matrix, S^ngrad is also sparse and cheap to compute.
-if ngrad == 1
-    Sn = S;
-else
-    Sn = speye(N);
-    for k = 1:ngrad
-        Sn = S * Sn;
-    end
-    Sn = sparse(Sn);
-end
 
 %% Set up matrices for Relaxation
 
@@ -172,8 +120,8 @@ else
 end
 
 
-%%% Composite relax-shift (using S^ngrad instead of S for gradient spoiling)
-SE = Sn * E;
+%%% Composite relax-shift
+SE = S*E;
 SE = sparse(SE);
 
 %%% Pre-allocate RF matrix
@@ -231,7 +179,7 @@ for jj=1:np
         break
     end
 
-    %%% Now deal with evolution (SE already encodes S^ngrad for gradient spoiling)
+    %%% Now deal with evolution
     FF(kidx) = SE(kidx,kidx)*F(kidx,jj)+b(kidx);
 
     % Deal with complex conjugate after shift

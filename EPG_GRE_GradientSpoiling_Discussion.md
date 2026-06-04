@@ -1,5 +1,5 @@
 # EPG_GRE Gradient Spoiling — Discussion Notes
-**Date:** 2026-05-27  
+**Date:** 2026-06-04  
 **Repository:** gabrielaBelsley/EPG-X  
 **Branch:** `claude/fervent-carson-pygwc`
 
@@ -28,154 +28,104 @@ The question was how to additionally incorporate **gradient spoiling** into this
 
 ---
 
-## Q1 — How to incorporate gradient spoiling into `EPG_GRE.m`?
+## Q1 — Does EPG already model gradient spoiling?
 
-### EPG theory background
-
-In the EPG formalism, a gradient lobe is represented as a **shift** of the state vector:
+**Yes.** The EPG shift matrix `S` (built by `EPG_shift_matrices.m`) already represents the action of a spoiler gradient each TR:
 
 ```
-F⁺ₙ  →  F⁺ₙ₊₁   (shift matrix S applied once per TR)
+S: F+k → F+(k+1),  F-k* → F-(k-1)*,  Zk → Zk  (unchanged)
 ```
 
-- **RF spoiling** is already modelled via the quadratic phase increment `phi` (φ₀ = 150°).
-- **Gradient spoiling** means applying a spoiler gradient with `ngrad` times the unit gradient area per TR. In EPG terms this replaces the single shift `S` with `S^ngrad` (S applied ngrad times per TR).
+Each application of `S` per TR pushes transverse coherences to higher k-space orders, exactly modelling the dephasing caused by the spoiler gradient. This is already the default behaviour in `EPG_GRE.m` via `SE = S * E`.
 
-With larger `ngrad`, transverse coherences are pushed to higher k-space orders per TR, making them harder to refocus. As ngrad → ∞, SEPG → STheory (perfect spoiling), so the correction factor → 1.
+---
 
-### Change made to `EPG_GRE.m`
+## Q2 — Why does gradient amplitude NOT affect the EPG signal (without diffusion)?
 
-A new optional parameter `'ngrad'` (positive integer, **default = 1**) was added. `ngrad = 1` reproduces the original behaviour exactly.
+**Key result:** Without diffusion, the EPG signal is **completely independent of spoiler gradient amplitude**. This is a fundamental property of the EPG formalism.
 
-**Key code changes (summary):**
+### Proof
+
+The EPG state at order `k` evolves as:
+
+```
+FF(kidx) = SE(kidx,kidx) * F(kidx,jj) + b(kidx)
+```
+
+The relaxation matrix `E` is diagonal with:
+- `E2 = exp(-TR/T2)` for all transverse states (F+k and F-k, every k)  
+- `E1 = exp(-TR/T1)` for all longitudinal states (Zk, every k)
+
+**E is k-independent** — the same relaxation applies at every EPG order. Similarly, the RF matrix `T` is block-diagonal with identical 3×3 blocks at every k-order.
+
+Therefore, applying `S^ngrad` instead of `S` only **relabels** k-space positions (F+0→F+ngrad instead of F+0→F+1) but does not change any amplitude or relaxation history. The signal at F+0 follows the same path regardless of ngrad.
+
+### Empirical verification
+
+Running `EPG_GRE` with `ngrad=1` and `ngrad=10` (200 RF pulses) gives **identical signals** — the difference is identically zero. This confirms the theoretical result.
+
+### Physical interpretation
+
+In SPGR the spoiler gradient dephases transverse magnetisation within the voxel. As long as diffusion is negligible, each isochromat evolves independently and the **ensemble-averaged signal** depends only on the phase distribution, not on the gradient amplitude that created it. With a uniform isochromat distribution (what EPG assumes), the signal is the same for any non-zero gradient.
+
+---
+
+## Q3 — How does gradient amplitude affect the EPG signal?
+
+The **only** mechanism by which gradient amplitude changes the EPG signal is through **diffusion** (T2* effects aside, which EPG does not model).
+
+When `diff` is provided:
 
 ```matlab
-% 1. Parse new parameter
-ngrad = 1; % default
-if strcmpi(varargin{ii},'ngrad')
-    ngrad = round(varargin{ii+1});
-end
-
-% 2. Scale kmax and kmax_per_pulse by ngrad
-kmax = (np - 1) * ngrad;
-kmax_per_pulse = ngrad * [1:ceil(np/2) (floor(np/2)):-1:1];
-
-% 3. Compute S^ngrad (once, before the TR loop)
-Sn = speye(N);
-for k = 1:ngrad
-    Sn = S * Sn;
-end
-
-% 4. Use S^ngrad in the composite relax-shift operator
-SE = Sn * E;   % was: SE = S * E
+d.G   = [G_pre, G_read, G_spoil];  % gradient amplitudes, mT/m
+d.tau = [tau_pre, tau_read, tau_spoil];  % durations, ms
+d.D   = 1e-9;  % diffusion coefficient, m^2/s
 ```
 
-Because `S` is a sparse permutation-like matrix, `S^ngrad` is also sparse and cheap to compute.
+The `E_diff` function computes b-values for each EPG order k:
 
-**Usage in `ModelSpoilCorrAllT1_CorrData.m`:**
+```
+b(k) ∝ k^2 * (γ * G * τ)^2
+```
+
+Higher gradient amplitude → larger b-values → stronger attenuation of high-order states → effectively better spoiling. This is the correct way to model gradient amplitude effects.
+
+---
+
+## Q4 — How are readout and spoiler gradients handled separately?
+
+In SPGR, the readout gradient is **balanced**: the pre-winding gradient cancels the readout gradient from echo to echo, so the net shift per TR = 0. Only the **spoiler gradient** contributes to the EPG shift `S`.
+
+- **Without diffusion**: the readout gradient is irrelevant to EPG — only the existence of a spoiler matters (not its amplitude).
+- **With diffusion** (`diff` parameter): all gradient events (pre-winder, readout, spoiler) contribute b-values. The `diff.G` and `diff.tau` vectors must list all segments including zero-gradient periods so that `sum(tau) = TR`.
+
+---
+
+## Q5 — What does this mean for the correction factor STheory/SEPG?
+
+**Without diffusion:**
+
+The EPG correction factor `STheory/SEPG` depends **only on the RF phase cycling pattern** (φ₀ = 150°), TR, T1, T2, and flip angle. It is **independent of the spoiler gradient amplitude**.
+
+The standard call:
 
 ```matlab
-% Original (RF spoiling only):
 [s0,~,~] = EPG_GRE(d2r(alphaArray(1,ialpha))*ones(NTR,1), phi, TR, T1(iT1), T2);
-
-% With combined RF + gradient spoiling:
-[s0,~,~] = EPG_GRE(d2r(alphaArray(1,ialpha))*ones(NTR,1), phi, TR, T1(iT1), T2, 'ngrad', 3);
 ```
 
-> **Computational cost** scales linearly with `ngrad` (state-vector size grows proportionally).
+already correctly models the incomplete spoiling due to RF phase cycling. No modification is needed for gradient spoiling when diffusion is negligible.
+
+**With diffusion:**
+
+If diffusion effects are important (large gradients, long TR, high D), use the `diff` parameter. For the actual sequence parameters (spoiler ~1.3 rad/voxel/TR, TR = 4.1 ms, in-vivo tissue), diffusion attenuation of EPG states will be small and the correction factor will be very close to the no-diffusion result.
 
 ---
 
-## Q2 — For a given physical dephasing, what `ngrad` to use?
+## Comparison with Hargreaves epg_rfspoil.m
 
-### Convention: 1 EPG unit = 2π rad/voxel
+Hargreaves' `epg_rfspoil.m` uses `epg_grelax.m` with `kg=1` (the `kg` parameter feeds only diffusion formulas, never changes the number of gradient shifts). `epg_grad.m` applies exactly one shift per TR via `circshift`. This is mathematically identical to `EPG_GRE.m` with the default `S` shift.
 
-If defining the EPG unit as one complete phase cycle across a voxel (2π rad/voxel):
-
-$$\text{ngrad} = \frac{\text{dephasing [rad/voxel per TR]}}{2\pi}$$
-
-| Dephasing per TR | Cycles/voxel | ngrad |
-|---|---|---|
-| 2π | 1 | 1 |
-| 4π | 2 | 2 |
-| 8π | 4 | 4 |
-| 16π | 8 | 8 |
-
-### Multi-axis spoiling (read + phase + slice)
-
-`EPG_GRE.m` is a **1D EPG** — it tracks dephasing along a single gradient axis. For spoilers in all three directions, a coherence pathway (k_read, k_phase, k_slice) can only contribute to the signal if **all three** k-components are simultaneously zero, making 3D spoiling more effective than 1D alone.
-
-**Practical 1D approximation** (Yarnykh 2007, Preibisch & Deichmann 2009):
-
-$$\text{ngrad}_\text{eff} = \text{ngrad}_R + \text{ngrad}_P + \text{ngrad}_S$$
-
-| Simulation | Implication |
-|---|---|
-| `ngrad` = dominant direction only | Conservative — slightly overestimates correction needed |
-| `ngrad` = sum of all 3 directions | Best approximation of actual 3D spoiling |
-| True 3D EPG (not in this codebase) | Exact — requires 3D state vector |
-
-> **Note on phase encoding:** In 3D acquisitions the phase-encode gradient itself contributes varying dephasing each TR as the phase-encode table steps, adding natural spoiling beyond the explicit spoiler. The effective ngrad_P may therefore be larger than the spoiler gradient alone, and the actual in-vivo correction factor is likely even closer to 1.
-
----
-
-## Q3 — Actual dephasing is 0.1256 rad per axis (not 4π)
-
-### Key numbers
-
-| Quantity | Per axis | All 3 axes |
-|---|---|---|
-| Dephasing per TR | 0.1256 rad | 0.3768 rad |
-| As fraction of 1 cycle | 0.02 cycles | 0.06 cycles |
-| TRs to accumulate 1 full cycle | **50 TRs** | ~17 TRs |
-| Total over NTR = 2000 | 251 rad ≈ 40 cycles | — |
-
-Note: 0.1256 ≈ 2π/50 = π/25.
-
-### Why the "4π → ngrad=2" rule does NOT apply here
-
-Under the 2π-per-voxel convention:
-
-$$\frac{0.1256}{2\pi} \approx 0.02 \quad \Rightarrow \quad \text{less than 1 EPG unit}$$
-
-Setting `ngrad = 2, 4, 8` etc. would model a gradient **50–400× stronger** than the actual physical gradient. This would be incorrect.
-
-### Correct interpretation
-
-The EPG unit is **not fixed** — it is whatever the physical gradient step is. In this sequence:
-
-- 1 EPG unit = 0.1256 rad/voxel per TR = the actual gradient step per axis
-- `ngrad = 1` represents the real single-axis gradient
-- For all three axes combined: **`ngrad = 3`** (arithmetic sum, one unit per axis)
-
-### Physical implication
-
-With only 0.02 cycles/voxel/TR, the gradient spoiling is **very weak**. The sequence relies almost entirely on **RF spoiling** (φ₀ = 150°). The dominant source of incomplete spoiling is the RF phase cycling pattern, not the gradient.
-
-The correction factor with `ngrad = 3` will be only marginally closer to 1 than with `ngrad = 1`, because even three axes combined accumulate only ~0.06 cycles per TR — far from a strong-gradient regime.
-
-### Recommended simulation call
-
-```matlab
-% Best approximation for 3-axis spoiling, each 0.1256 rad/TR:
-[s0,~,~] = EPG_GRE(d2r(alphaArray(1,ialpha))*ones(NTR,1), phi, TR, T1(iT1), T2, 'ngrad', 3);
-
-% Conservative (single axis only):
-[s0,~,~] = EPG_GRE(d2r(alphaArray(1,ialpha))*ones(NTR,1), phi, TR, T1(iT1), T2);  % ngrad=1 default
-```
-
----
-
-## Summary table
-
-| Scenario | `ngrad` | Notes |
-|---|---|---|
-| RF spoiling only (original code) | 1 (default) | Baseline — φ₀=150° quadratic phase cycling |
-| + gradient spoiling, 1 axis, 4π/TR | 2 | Unit = 2π/voxel convention |
-| + gradient spoiling, 3 axes, 4π/TR each | 6 | Arithmetic sum |
-| + gradient spoiling, 1 axis, 0.1256 rad/TR | 1 | Unit = physical step |
-| **+ gradient spoiling, 3 axes, 0.1256 rad/TR each** | **3** | **This sequence — recommended** |
-| Perfect gradient spoiling (theoretical limit) | large | Correction → 1 |
+Both codes produce the same correction factor for the same RF phase cycling parameters.
 
 ---
 
@@ -183,9 +133,20 @@ The correction factor with `ngrad = 3` will be only marginally closer to 1 than 
 
 | File | Change |
 |---|---|
-| `EPGX-src/EPG_GRE.m` | Added `'ngrad'` optional parameter for gradient spoiling |
+| `EPGX-src/EPG_GRE.m` | Reverted to original Malik code — removed incorrect `ngrad` parameter |
+| `EPG_GRE_GradientSpoiling_Discussion.md` | Updated to reflect correct understanding |
 
-**Commit:** `ee18297` — *Add ngrad parameter to EPG_GRE for combined RF + gradient spoiling*
+---
+
+## Summary
+
+| Question | Answer |
+|---|---|
+| Does EPG model gradient spoiling? | Yes — shift matrix `S` already does this |
+| Does gradient amplitude change SEPG (no diffusion)? | **No** — EPG is scale-invariant in gradient amplitude without diffusion |
+| How to model gradient amplitude effects? | Use the `diff` parameter (diffusion) |
+| Is the original `EPG_GRE.m` call correct for this sequence? | **Yes** — no modification needed |
+| What drives the correction factor? | RF phase cycling (φ₀) only, when diffusion is negligible |
 
 ---
 
